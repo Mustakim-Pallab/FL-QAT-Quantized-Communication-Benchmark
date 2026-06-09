@@ -35,6 +35,12 @@ Full options:
 | `--adapter-type` | attention | `attention` or `mlp` |
 | `--adapter-hidden-dim` | 512 | Adapter hidden dimension |
 | `--fedprox-mu` | 0.01 | FedProx proximal term |
+| `--keep-small-tensors-fp32` | True | Keep small tensors in FP32 during quantization |
+| `--no-keep-small-tensors-fp32` | — | Disable above |
+| `--use-error-feedback` | True | Error feedback for quantized communication |
+| `--no-use-error-feedback` | — | Disable above |
+| `--quantize-downlink` | True | Quantize server-to-client downlink |
+| `--no-quantize-downlink` | — | Disable above |
 | `--model` | all | Single model to run |
 | `--log-level` | INFO | Logging verbosity |
 
