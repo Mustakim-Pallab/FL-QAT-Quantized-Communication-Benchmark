@@ -1,38 +1,17 @@
 import copy
-from collections import OrderedDict
-
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, Subset
+from collections import OrderedDict
+from torch.utils.data import DataLoader, Dataset, Subset
+from typing import Callable
 
-from config import (
-    ADAPTER_BACKBONE_LR,
-    ADAPTER_LR,
-    BATCH_SIZE,
-    BRAIN_TUMOR_ADAPTER_BACKBONE_LR,
-    BRAIN_TUMOR_ADAPTER_LR,
-    BRAIN_TUMOR_GLOBAL_ROUNDS,
-    BRAIN_TUMOR_LOCAL_EPOCHS,
-    BRAIN_TUMOR_QUANTIZED_WARMUP_ROUNDS,
-    BRAIN_TUMOR_VANILLA_LR,
-    FEDPROX_MU,
-    GLOBAL_ROUNDS,
-    LOCAL_EPOCHS,
-    QUANTIZED_WARMUP_ROUNDS,
-    QUANTIZE_DOWNLINK,
-    SEED,
-    USE_CLASS_BALANCED_LOSS,
-    USE_ERROR_FEEDBACK,
-    VANILLA_LR,
-    WEIGHT_DECAY,
-    is_brain_tumor_dataset,
-)
+from config import Config
 from config import set_global_seed
-from federated.client import train_one_client
-from model import AdapterModel
-from utils.quant_utils import (
+from fed.client import train_one_client
+from models import AdapterModel
+from quant import (
     apply_averaged_update,
     average_payloads,
     communicated_keys,
@@ -45,10 +24,17 @@ from utils.quant_utils import (
     quantize_update_for_communication,
     remove_weight_qat,
 )
+from utils.logging_utils import get_logger
+
+logger = get_logger()
 
 
-def build_criterion(train_dataset, device):
-    if not USE_CLASS_BALANCED_LOSS:
+def build_criterion(
+        train_dataset: Dataset,
+        device: torch.device,
+        config: Config,
+) -> nn.Module:
+    if not config.use_class_balanced_loss:
         return nn.CrossEntropyLoss()
 
     labels = np.array([label for _, label in train_dataset])
@@ -56,22 +42,18 @@ def build_criterion(train_dataset, device):
     class_counts = np.maximum(class_counts, 1)
     weights = 1.0 / torch.tensor(class_counts, dtype=torch.float32)
     weights = weights / weights.sum() * len(class_counts)
-    print(f"Class-balanced loss weights: {weights.tolist()}")
+    logger.info("Class-balanced loss weights: %s", weights.tolist())
     return nn.CrossEntropyLoss(weight=weights.to(device))
 
 
-def build_optimizer(model):
-    vanilla_lr = BRAIN_TUMOR_VANILLA_LR if is_brain_tumor_dataset() else VANILLA_LR
-    adapter_lr = BRAIN_TUMOR_ADAPTER_LR if is_brain_tumor_dataset() else ADAPTER_LR
-    adapter_backbone_lr = (
-        BRAIN_TUMOR_ADAPTER_BACKBONE_LR
-        if is_brain_tumor_dataset()
-        else ADAPTER_BACKBONE_LR
-    )
-
+def build_optimizer(
+        model: nn.Module,
+        config: Config,
+        dataset_name: str | None = None,
+) -> torch.optim.Optimizer:
     if isinstance(model, AdapterModel):
-        head_params = []
-        backbone_params = []
+        head_params: list[nn.Parameter] = []
+        backbone_params: list[nn.Parameter] = []
 
         for name, param in model.named_parameters():
             if not param.requires_grad:
@@ -83,95 +65,82 @@ def build_optimizer(model):
 
         param_groups = []
         if head_params:
-            param_groups.append({"params": head_params, "lr": adapter_lr})
+            param_groups.append({"params": head_params, "lr": config.adapter_lr_for(dataset_name)})
         if backbone_params:
-            param_groups.append({"params": backbone_params, "lr": adapter_backbone_lr})
+            param_groups.append({"params": backbone_params, "lr": config.adapter_backbone_lr_for(dataset_name)})
 
-        return optim.AdamW(param_groups, weight_decay=WEIGHT_DECAY)
+        return optim.AdamW(param_groups, weight_decay=config.weight_decay)
 
-    trainable_params = [param for param in model.parameters() if param.requires_grad]
-    return optim.AdamW(trainable_params, lr=vanilla_lr, weight_decay=WEIGHT_DECAY)
-
-
-def training_schedule(dataset_name, model_name):
-    if is_brain_tumor_dataset(dataset_name=dataset_name):
-        return {
-            "global_rounds": BRAIN_TUMOR_GLOBAL_ROUNDS,
-            "local_epochs": BRAIN_TUMOR_LOCAL_EPOCHS,
-            "quantized_warmup_rounds": BRAIN_TUMOR_QUANTIZED_WARMUP_ROUNDS,
-        }
-
-    return {
-        "global_rounds": GLOBAL_ROUNDS,
-        "local_epochs": LOCAL_EPOCHS,
-        "quantized_warmup_rounds": QUANTIZED_WARMUP_ROUNDS,
-    }
+    trainable_params = [p for p in model.parameters() if p.requires_grad]
+    return optim.AdamW(trainable_params, lr=config.vanilla_lr_for(dataset_name), weight_decay=config.weight_decay)
 
 
 def federated_train(
-    model_factory,
-    model_name,
-    train_dataset,
-    partitions,
-    device,
-    label,
-    comm_bits=None,
-    qat_bits=None,
-    initial_state=None,
-    experiment_seed=SEED,
-    dataset_name=None,
-):
-    print("\n" + "=" * 80)
-    print(f"STARTING {label}: {model_name}")
-    print("=" * 80)
+        model_factory: Callable[[str], nn.Module],
+        model_name: str,
+        train_dataset: Dataset,
+        partitions: dict[int, list[int]],
+        device: torch.device,
+        label: str,
+        config: Config,
+        comm_bits: int | None = None,
+        qat_bits: int | None = None,
+        initial_state: OrderedDict[str, torch.Tensor] | None = None,
+        experiment_seed: int = 42,
+        dataset_name: str | None = None,
+) -> tuple[nn.Module, float, list[str]]:
+    logger.info("=" * 80)
+    logger.info("STARTING %s: %s", label, model_name)
+    logger.info("=" * 80)
 
     set_global_seed(experiment_seed)
     global_model = model_factory(model_name).to(device)
     if initial_state is not None:
         global_model.load_state_dict(copy.deepcopy(initial_state), strict=True)
+
     keys = communicated_keys(global_model)
-    criterion = build_criterion(train_dataset, device)
-    communication_sizes = []
-    schedule = training_schedule(dataset_name, model_name)
+    criterion = build_criterion(train_dataset, device, config)
+    communication_sizes: list[float] = []
+    schedule = config.training_schedule(dataset_name)
     global_rounds = schedule["global_rounds"]
     local_epochs = schedule["local_epochs"]
     quantized_warmup_rounds = schedule["quantized_warmup_rounds"]
-    print(
-        "Schedule: "
-        f"rounds={global_rounds}, local_epochs={local_epochs}, "
-        f"quantized_warmup_rounds={quantized_warmup_rounds}"
-    )
-    error_buffers = {client_id: OrderedDict() for client_id in partitions}
+
+    logger.info("Schedule: rounds=%d, local_epochs=%d, quantized_warmup_rounds=%d",
+                global_rounds, local_epochs, quantized_warmup_rounds)
+
+    error_buffers: dict[int, OrderedDict[str, torch.Tensor]] = {
+        client_id: OrderedDict() for client_id in partitions
+    }
 
     for round_idx in range(global_rounds):
-        print(f"\nGlobal round {round_idx + 1}/{global_rounds}")
+        logger.info("Global round %d/%d", round_idx + 1, global_rounds)
         use_quantized_round = comm_bits is not None and round_idx >= quantized_warmup_rounds
 
         global_model.cpu()
         global_state = global_model.state_dict()
 
-        proximal_state = {
-            key: value.detach().clone()
+        proximal_state: OrderedDict[str, torch.Tensor] = OrderedDict(
+            (key, value.detach().clone())
             for key, value in global_state.items()
             if torch.is_floating_point(value)
-        }
+        )
 
-        if use_quantized_round and QUANTIZE_DOWNLINK:
+        if use_quantized_round and config.quantize_downlink:
             server_payload, server_payload_mb = quantize_for_communication(
-                global_state, keys, comm_bits,
+                global_state, keys, comm_bits, config,
             )
         else:
             server_payload, server_payload_mb = fp32_for_communication(global_state, keys)
 
-        client_payloads = []
-        client_sizes = []
+        client_payloads: list[OrderedDict[str, torch.Tensor]] = []
+        client_sizes: list[int] = []
 
         for client_id, data_indices in partitions.items():
-            print(f"  Client {client_id}: training on {len(data_indices)} samples")
+            logger.info("  Client %d: training on %d samples", client_id, len(data_indices))
 
             set_global_seed(experiment_seed + round_idx * 1000 + client_id)
             client_model = model_factory(model_name).to(device)
-
             load_communicated_state(client_model, server_payload)
 
             if qat_bits is not None and round_idx >= quantized_warmup_rounds:
@@ -181,19 +150,15 @@ def federated_train(
             loader_generator.manual_seed(experiment_seed + round_idx * 1000 + client_id)
             client_loader = DataLoader(
                 Subset(train_dataset, data_indices),
-                batch_size=BATCH_SIZE,
+                batch_size=config.batch_size,
                 shuffle=True,
                 generator=loader_generator,
             )
-            optimizer = build_optimizer(client_model)
+            optimizer = build_optimizer(client_model, config, dataset_name)
+
             train_one_client(
-                client_model,
-                client_loader,
-                criterion,
-                optimizer,
-                device,
-                local_epochs,
-                proximal_state=proximal_state,
+                client_model, client_loader, criterion, optimizer, device,
+                local_epochs, config, proximal_state=proximal_state,
             )
 
             client_model.cpu()
@@ -205,18 +170,17 @@ def federated_train(
             delta = model_delta(client_state, global_state, keys)
 
             if not use_quantized_round:
-                payload, payload_mb = fp32_update_for_communication(delta, keys)
-                _ = OrderedDict()
+                payload, payload_mb = fp32_update_for_communication(delta, keys, config)
             else:
-                residual = error_buffers[client_id] if USE_ERROR_FEEDBACK else None
+                residual = error_buffers[client_id] if config.use_error_feedback else None
                 payload, payload_mb, next_residual = quantize_update_for_communication(
-                    delta, keys, comm_bits, residual=residual,
+                    delta, keys, comm_bits, config, residual=residual,
                 )
-                if USE_ERROR_FEEDBACK:
+                if config.use_error_feedback:
                     error_buffers[client_id] = next_residual
 
-            print(f"    Upload payload:   {payload_mb:.4f} MB")
-            print(f"    Download payload: {server_payload_mb:.4f} MB")
+            logger.info("    Upload payload:   %.4f MB", payload_mb)
+            logger.info("    Download payload: %.4f MB", server_payload_mb)
             client_payloads.append(payload)
             client_sizes.append(len(data_indices))
             communication_sizes.append(payload_mb + server_payload_mb)
