@@ -60,3 +60,24 @@ def print_results_table(results: list[dict[str, Any]], dataset_name: str) -> Non
               f"{metric_cell(row['adapter_int8_acc'], row['adapter_int8_upload'])} & "
               f"{metric_cell(row['vanilla_int4_acc'], row['vanilla_int4_upload'])} & "
               f"{metric_cell(row['adapter_int4_acc'], row['adapter_int4_upload'])} \\\\")
+
+
+def print_vanilla_fedprox_results_table(results: list[dict[str, Any]], dataset_name: str) -> None:
+    print("\n" + "=" * 72)
+    print(f"FINAL VANILLA FEDPROX SUMMARY: {dataset_name}")
+    print("Accuracy is final model accuracy. MB is average client communication per round.")
+    print("Communication MB includes download + upload for the communicated parameters.")
+    print("=" * 72)
+    print(f"{'Model':<14} {'Vanilla FedProx (FP32)':<24}")
+    print("-" * 72)
+
+    for row in results:
+        print(f"{row['model']:<14} "
+              f"{metric_cell(row['vanilla_fp32_acc'], row['vanilla_fp32_upload']):<24}")
+
+    print("\nLaTeX table rows:")
+    print(r"\textbf{Model} & \textbf{Vanilla FedProx (FP32)} \\")
+    print(r"\hline")
+    for row in results:
+        print(f"{row['model']} & "
+              f"{metric_cell(row['vanilla_fp32_acc'], row['vanilla_fp32_upload'])} \\")

@@ -12,7 +12,7 @@ from quant import (
     fake_quantize_model_for_final_eval,
 )
 from utils.device import get_device_info, resolve_device
-from utils.display import display_name, print_results_table
+from utils.display import display_name, print_results_table, print_vanilla_fedprox_results_table
 from utils.evaluation import evaluate_model, get_full_state_size_mb
 from utils.logging_utils import get_logger
 
@@ -25,6 +25,10 @@ EXPERIMENTS: list[dict[str, Any]] = [
     {"label": "ADAPTER QAT INT8", "is_adapter": True, "comm_bits": 8, "qat_bits": 8},
     {"label": "VANILLA QAT INT4", "is_adapter": False, "comm_bits": 4, "qat_bits": 4},
     {"label": "ADAPTER QAT INT4", "is_adapter": True, "comm_bits": 4, "qat_bits": 4},
+]
+
+VANILLA_FEDPROX_EXPERIMENTS: list[dict[str, Any]] = [
+    {"label": "VANILLA FP32 FL", "is_adapter": False, "comm_bits": None, "qat_bits": None},
 ]
 
 
@@ -77,6 +81,11 @@ def build_initial_states(vanilla_factory, adapter_factory, model_name: str, expe
     return vanilla_init, adapter_init
 
 
+def build_vanilla_initial_state(vanilla_factory, model_name: str, experiment_seed: int):
+    set_global_seed(experiment_seed)
+    return copy.deepcopy(vanilla_factory(model_name).cpu().state_dict())
+
+
 def train_experiments(
         factories: dict[str, Any],
         initial_states: dict[str, Any],
@@ -90,7 +99,9 @@ def train_experiments(
 ) -> dict[str, tuple[torch.nn.Module, float, list[str]]]:
     trained: dict[str, tuple[torch.nn.Module, float, list[str]]] = {}
 
-    for exp in EXPERIMENTS:
+    experiments = VANILLA_FEDPROX_EXPERIMENTS if config.vanilla_fedprox_only else EXPERIMENTS
+
+    for exp in experiments:
         factory = factories["adapter"] if exp["is_adapter"] else factories["vanilla"]
         init_state = initial_states["adapter"] if exp["is_adapter"] else initial_states["vanilla"]
 
@@ -136,11 +147,26 @@ def build_row(
     }
 
 
+def build_vanilla_fedprox_row(
+        trained: dict[str, tuple[torch.nn.Module, float, list[str]]],
+        model_name: str,
+        test_loader: torch.utils.data.DataLoader,
+        device: torch.device,
+        class_names: list[str],
+) -> dict[str, Any]:
+    return {
+        "model": display_name(model_name),
+        "vanilla_fp32_acc": _eval_acc(trained, "VANILLA FP32 FL", test_loader, device, class_names),
+        "vanilla_fp32_upload": trained["VANILLA FP32 FL"][1],
+    }
+
+
 def log_model_sizes(trained: dict, config: Config) -> None:
     logger.info("Final full state sizes for reference:")
-    for tag, bits in [("VANILLA FP32 FL", None), ("ADAPTER FP32 FL", None),
-                      ("VANILLA QAT INT8", 8), ("ADAPTER QAT INT8", 8),
-                      ("VANILLA QAT INT4", 4), ("ADAPTER QAT INT4", 4)]:
+    experiments = VANILLA_FEDPROX_EXPERIMENTS if config.vanilla_fedprox_only else EXPERIMENTS
+    for exp in experiments:
+        tag = exp["label"]
+        bits = exp["qat_bits"]
         model, _, keys = trained[tag]
         if bits is None:
             logger.info("  %-42s %.2f MB", tag, get_full_state_size_mb(model))
@@ -178,9 +204,13 @@ def _run_dataset_experiments(config: Config, dataset_config: dict, device: torch
         experiment_seed = dataset_seed + model_idx * 10000
 
         vanilla_factory, adapter_factory = make_factories(num_classes, config, dataset_name)
-        vanilla_init, adapter_init = build_initial_states(
-            vanilla_factory, adapter_factory, model_name, experiment_seed,
-        )
+        if config.vanilla_fedprox_only:
+            vanilla_init = build_vanilla_initial_state(vanilla_factory, model_name, experiment_seed)
+            adapter_init = None
+        else:
+            vanilla_init, adapter_init = build_initial_states(
+                vanilla_factory, adapter_factory, model_name, experiment_seed,
+            )
 
         factories = {"vanilla": vanilla_factory, "adapter": adapter_factory}
         init_states = {"vanilla": vanilla_init, "adapter": adapter_init}
@@ -190,13 +220,22 @@ def _run_dataset_experiments(config: Config, dataset_config: dict, device: torch
             partitions, device, config, dataset_name, experiment_seed,
         )
 
-        row = build_row(trained, model_name, test_loader, device, class_names, config)
+        if config.vanilla_fedprox_only:
+            row = build_vanilla_fedprox_row(trained, model_name, test_loader, device, class_names)
+        else:
+            row = build_row(trained, model_name, test_loader, device, class_names, config)
         results.append(row)
 
         log_model_sizes(trained, config)
-        print_results_table(results, dataset_name)
+        if config.vanilla_fedprox_only:
+            print_vanilla_fedprox_results_table(results, dataset_name)
+        else:
+            print_results_table(results, dataset_name)
 
-    print_results_table(results, dataset_name)
+    if config.vanilla_fedprox_only:
+        print_vanilla_fedprox_results_table(results, dataset_name)
+    else:
+        print_results_table(results, dataset_name)
     return results
 
 

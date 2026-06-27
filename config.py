@@ -1,23 +1,37 @@
+from __future__ import annotations
+
 import numpy as np
 import random
 import torch
 from dataclasses import dataclass, replace
+from pathlib import Path
 from typing import Sequence
+
+DATASET_ROOT = Path(__file__).resolve().parent / "datasets"
 
 DATASET_DEFAULTS: tuple[dict[str, str], ...] = (
     {
+        "name": "Lung Ultrasound",
+        "train_dir": str(DATASET_ROOT / "lungs_ultrasound" / "train"),
+        "test_dir": str(DATASET_ROOT / "lungs_ultrasound" / "test"),
+    },
+    {
         "name": "Brain Tumor",
-        "train_dir": "/content/drive/MyDrive/datasets_for_fl/brain_tumor/train",
-        "test_dir": "/content/drive/MyDrive/datasets_for_fl/brain_tumor/test",
+        "train_dir": str(DATASET_ROOT / "brain_tumor" / "train"),
+        "test_dir": str(DATASET_ROOT / "brain_tumor" / "test"),
     },
     {
         "name": "Fundus Diabetic Retinopathy",
-        "train_dir": "/content/drive/MyDrive/datasets_for_fl/fundus_diabetic_retinopathy/train",
-        "test_dir": "/content/drive/MyDrive/datasets_for_fl/fundus_diabetic_retinopathy/test",
+        "train_dir": str(DATASET_ROOT / "fundus_diabetic_retinopathy" / "train"),
+        "test_dir": str(DATASET_ROOT / "fundus_diabetic_retinopathy" / "test"),
     },
 )
 
 MODEL_NAME_DEFAULTS: tuple[str, ...] = (
+    "mobilenet_v2",
+    "resnet18",
+    # "densenet121",
+    # "alexnet",
     "vit_b_16",
 )
 
@@ -73,6 +87,7 @@ class Config:
     use_error_feedback: bool = True
     keep_small_tensors_fp32: bool = True
     fedprox_mu: float = 0.01
+    vanilla_fedprox_only: bool = False
     grad_clip_norm: float = 1.0
     seed: int = 42
 

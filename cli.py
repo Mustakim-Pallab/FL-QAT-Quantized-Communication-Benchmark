@@ -23,6 +23,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-use-error-feedback", dest="use_error_feedback", action="store_false")
     parser.add_argument("--quantize-downlink", action="store_true", default=True)
     parser.add_argument("--no-quantize-downlink", dest="quantize_downlink", action="store_false")
+    parser.add_argument(
+        "--vanilla-fedprox-only",
+        action="store_true",
+        help="Run only the vanilla FP32 FedProx experiment and skip adapter/QAT variants.",
+    )
     parser.add_argument("--model", type=str, default=None, choices=list(DISPLAY_NAMES.keys()))
     parser.add_argument("--log-level", type=str, default="INFO", choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     return parser
@@ -37,6 +42,7 @@ def config_from_args(args: argparse.Namespace) -> Config:
         keep_small_tensors_fp32=args.keep_small_tensors_fp32,
         fedprox_mu=args.fedprox_mu, use_error_feedback=args.use_error_feedback,
         quantize_downlink=args.quantize_downlink,
+        vanilla_fedprox_only=args.vanilla_fedprox_only,
     )
     if args.model:
         config = config.with_overrides(model_names=(args.model,))
